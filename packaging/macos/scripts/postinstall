@@ -1,0 +1,14 @@
+#!/bin/bash
+# postinstall — Runs after the package files are installed.
+# Registers the quantifai-sync LaunchAgent so the background service
+# starts automatically at login.
+
+# Run as the installing user (not root) if possible
+BINARY="/usr/local/bin/quantifai-sync"
+
+if [ -x "${BINARY}" ]; then
+    # The install command creates and loads the LaunchAgent plist
+    "${BINARY}" install 2>/dev/null || true
+fi
+
+exit 0

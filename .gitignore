@@ -1,0 +1,8 @@
+# Binaries
+quantifai-sync
+ai-ops-shipper
+*.pkg
+bin/
+
+# OS
+.DS_Store

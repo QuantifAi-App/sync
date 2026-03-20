@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+    <title>Quantifai Sync</title>
+    <organization>com.quantifai</organization>
+
+    <welcome file="welcome.html" mime-type="text/html"/>
+    <license file="license.html" mime-type="text/html"/>
+
+    <options customize="never" require-scripts="false" hostArchitectures="arm64,x86_64"/>
+
+    <!-- Only allow installation on macOS 12+ -->
+    <os-version min="12.0"/>
+
+    <choices-outline>
+        <line choice="default">
+            <line choice="com.quantifai.sync"/>
+        </line>
+    </choices-outline>
+
+    <choice id="default"/>
+    <choice id="com.quantifai.sync"
+            visible="false"
+            title="Quantifai Sync Agent"
+            description="Background telemetry sync agent">
+        <pkg-ref id="com.quantifai.sync"/>
+    </choice>
+
+    <pkg-ref id="com.quantifai.sync"
+             version="0"
+             onConclusion="none">component.pkg</pkg-ref>
+</installer-gui-script>
