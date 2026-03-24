@@ -23,8 +23,8 @@ import (
 	"github.com/quantifai/sync/internal/reader"
 	"github.com/quantifai/sync/internal/sender"
 	"github.com/quantifai/sync/internal/state"
+	"github.com/quantifai/sync/internal/scanner"
 	"github.com/quantifai/sync/internal/updater"
-	"github.com/quantifai/sync/internal/watcher"
 )
 
 // shutdownTimeout is the maximum time allowed for a graceful shutdown
@@ -201,46 +201,57 @@ func runAgent() int {
 		return ok
 	})
 
-	// Start the buffer's timer-based flush loop
-	go buf.Run(ctx)
-
-	// Initialize watcher
-	w, err := watcher.New(cfg.WatchDir)
-	if err != nil {
-		log.Error("failed to create watcher", map[string]any{"error": err.Error()})
-		return 1
-	}
-	if err := w.Start(); err != nil {
-		log.Error("failed to start watcher", map[string]any{"error": err.Error()})
-		return 1
-	}
+	liteMode := parser.IsLiteKey(cfg.APIKey)
+	scanInterval := time.Duration(cfg.FlushInterval) * time.Second
 
 	log.Info("pipeline started", map[string]any{
 		"watch_dir":      cfg.WatchDir,
 		"batch_size":     cfg.BatchSize,
-		"flush_interval": cfg.FlushInterval,
+		"scan_interval":  cfg.FlushInterval,
 		"health_port":    cfg.HealthPort,
 	})
 
 	healthState.SetStatus(health.StatusOK)
 
-	// Main event loop: process file events and handle shutdown
+	// Poll-based main loop: scan → read → parse → buffer → flush
+	// Every cycle walks the directory, finds files with new data,
+	// reads new bytes, parses records, and flushes the batch.
+	// First cycle processes all historical files (backfill).
+	scanAndProcess := func() {
+		files := scanner.Scan(cfg.WatchDir, stateMgr)
+		if len(files) == 0 {
+			return
+		}
+
+		for _, f := range files {
+			processFile(ctx, f.Path, f.ByteOffset, stateMgr, identity, buf, log, cfg.IntentTagEnabled, liteMode)
+		}
+
+		// Flush after processing all files in this cycle
+		buf.Flush(ctx)
+		healthState.SetRecordsBuffered(buf.Len())
+
+		total, pending := scanner.Count(cfg.WatchDir, stateMgr)
+		healthState.SetFilesTracked(total)
+		if pending > 0 {
+			log.Debug("scan cycle complete", map[string]any{
+				"files_scanned": len(files),
+				"total_files":   total,
+				"pending":       pending,
+			})
+		}
+	}
+
+	// Run first scan immediately (handles backfill)
+	scanAndProcess()
+
+	ticker := time.NewTicker(scanInterval)
+	defer ticker.Stop()
+
 	for {
 		select {
-		case evt, ok := <-w.Events():
-			if !ok {
-				log.Info("watcher events channel closed", nil)
-				cancel()
-				goto shutdown
-			}
-			processFileEvent(ctx, evt, stateMgr, identity, buf, log, cfg.IntentTagEnabled, parser.IsLiteKey(cfg.APIKey))
-			healthState.SetRecordsBuffered(buf.Len())
-
-		case err, ok := <-w.Errors():
-			if !ok {
-				continue
-			}
-			log.Warn("watcher error", map[string]any{"error": err.Error()})
+		case <-ticker.C:
+			scanAndProcess()
 
 		case sig := <-sigCh:
 			log.Info("received signal, initiating graceful shutdown", map[string]any{
@@ -252,14 +263,16 @@ func runAgent() int {
 	}
 
 shutdown:
-	return gracefulShutdown(w, buf, stateMgr, log)
+	return gracefulShutdown(buf, stateMgr, log)
 }
 
-// processFileEvent handles a single file change event: read new lines,
-// parse them into MessageRecord structs, and add to the send buffer.
-func processFileEvent(
+// processFile reads new lines from a JSONL file starting at the given
+// byte offset, parses them into MessageRecord structs, and adds them to
+// the send buffer.
+func processFile(
 	ctx context.Context,
-	evt watcher.Event,
+	filePath string,
+	byteOffset int64,
 	stateMgr *state.Manager,
 	identity *parser.Identity,
 	buf *sender.Buffer,
@@ -267,10 +280,7 @@ func processFileEvent(
 	intentTagEnabled bool,
 	liteMode bool,
 ) {
-	filePath := evt.Path
-	fileState := stateMgr.Get(filePath)
-
-	result, err := reader.ReadFromOffset(filePath, fileState.ByteOffset)
+	result, err := reader.ReadFromOffset(filePath, byteOffset)
 	if err != nil {
 		log.Warn("failed to read file", map[string]any{
 			"path":  filePath,
@@ -358,9 +368,9 @@ func projectPathFromFile(filePath string) string {
 	return dir
 }
 
-// gracefulShutdown flushes remaining records, persists state, and closes
-// the watcher.  Returns exit code 0 on success, 1 on timeout.
-func gracefulShutdown(w *watcher.Watcher, buf *sender.Buffer, stateMgr *state.Manager, log *logger.Logger) int {
+// gracefulShutdown flushes remaining records and persists state.
+// Returns exit code 0 on success, 1 on timeout.
+func gracefulShutdown(buf *sender.Buffer, stateMgr *state.Manager, log *logger.Logger) int {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -372,11 +382,6 @@ func gracefulShutdown(w *watcher.Watcher, buf *sender.Buffer, stateMgr *state.Ma
 		// Persist state
 		if err := stateMgr.Save(); err != nil {
 			log.Error("failed to save state during shutdown", map[string]any{"error": err.Error()})
-		}
-
-		// Close watcher
-		if err := w.Close(); err != nil {
-			log.Warn("error closing watcher", map[string]any{"error": err.Error()})
 		}
 
 		log.Info("shutdown complete", nil)
