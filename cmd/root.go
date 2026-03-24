@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -348,24 +350,26 @@ func processFile(
 
 // projectPathFromFile extracts the project directory name (the
 // dash-encoded path) from a JSONL file's absolute path.  Claude Code
-// stores sessions at ~/.claude/projects/<encoded-path>/<session>.jsonl,
-// so the project path is the parent directory name.
+// stores sessions at:
+//   ~/.claude/projects/<encoded-path>/<session>.jsonl
+//   ~/.claude/projects/<encoded-path>/<session>/subagents/<agent>.jsonl
+//
+// For subagent files, we walk up past the subagents/ and session UUID
+// directories to reach the encoded project path.
 func projectPathFromFile(filePath string) string {
-	// Walk up from file to get the parent directory name
-	dir := filePath
-	for i := len(dir) - 1; i >= 0; i-- {
-		if dir[i] == '/' || dir[i] == '\\' {
-			dir = dir[:i]
-			break
+	// Split into path components
+	parts := strings.Split(filepath.ToSlash(filePath), "/")
+
+	// Find "projects" in the path — the next component is the encoded project name
+	for i, part := range parts {
+		if part == "projects" && i+1 < len(parts) {
+			return parts[i+1]
 		}
 	}
-	// Now extract the last component of dir
-	for i := len(dir) - 1; i >= 0; i-- {
-		if dir[i] == '/' || dir[i] == '\\' {
-			return dir[i+1:]
-		}
-	}
-	return dir
+
+	// Fallback: parent directory name
+	dir := filepath.Dir(filePath)
+	return filepath.Base(dir)
 }
 
 // gracefulShutdown flushes remaining records and persists state.
